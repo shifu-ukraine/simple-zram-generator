@@ -51,3 +51,21 @@ The script reads your layout and populates the system with these native configur
 
 ## License
 [MIT License](LICENSE)
+
+## Quick Start (TL;DR)
+
+If you just want to deploy this setup immediately with the default configuration:
+
+```bash
+# 1. Download the configurator and the sample layout
+sudo wget https://raw.githubusercontent.com/shifu-ukraine/simple-zram-generator/main/simple-zram-generator -O /usr/local/bin/simple-zram-generator
+sudo wget https://raw.githubusercontent.com/shifu-ukraine/simple-zram-generator/main/zram-slices.conf -O /etc/zram-slices.conf
+
+# 2. Make it executable and run
+sudo chmod +x /usr/local/bin/simple-zram-generator
+sudo /usr/local/bin/simple-zram-generator
+
+# 3. (Optional) Rebuild initramfs if needed, then reboot
+sudo dracut --force # or your distro's equivalent
+sudo reboot
+```
