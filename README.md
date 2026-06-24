@@ -9,6 +9,16 @@ A flexible, configuration-driven Bash script that automatically generates native
 - **Native systemd approach:** Generates individual `.swap`, `.mount`, and companion formatting `.service` files with bulletproof dependency mapping (`After=`, `Requires=`, `Before=`).
 - **No external block-device wrappers:** Uses systemd's native declarative syntax, eliminating unnecessary background daemons or messy wrapper scripts.
 
+### Why this instead of systemd's zram-generator?
+
+`zram-generator` is an excellent open-source tool, but it works dynamically at boot time and is written in Rust, which introduces heavy build-time dependencies (like the Rust toolchain) — a significant drawback for minimalist or source-based distributions like Gentoo.
+
+This project takes a completely different, lightweight approach:
+
+* **Zero Compile-Time Dependencies:** It's a plain, lightweight Bash script. No heavy toolchains or compilers are required to deploy it.
+* **One-Time Execution:** It doesn't run at every boot. It executes once to generate persistent, native systemd units directly inside `/etc/systemd/system/` and never consumes system resources again.
+* **Direct Control:** You can manually inspect, tweak, or extend the generated `.service` and `.mount` units without being restricted by a third-party configuration syntax or dynamic generator magic.
+
 ## File Layout
 
 1. `/etc/zram-slices.conf` — The layout configuration file where you define your ZRAM devices.
@@ -27,6 +37,7 @@ Define your ZRAM slices in `/etc/zram-slices.conf` using the following pipe-sepa
 "1G  | zstd | tmp   | /tmp"
 "22G | zstd | mount | /var/tmp/portage"
 ```
+> ⚠️ **Warning:** Do not use the `tmp` type if your systemd configuration doesn't have `tmp.mount`. In such cases, use the standard `mount` type instead to manually specify the target directory.
 
 ## Installation & Deployment
 
