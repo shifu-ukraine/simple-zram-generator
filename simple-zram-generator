@@ -22,6 +22,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 1
 fi
 
+echo "---------- Simple zram generator ----------"
 echo "=== Starting Dynamic ZRAM Configuration ==="
 
 echo "KERNEL==\"zram*\", ATTR{disksize}!=\"0\", GOTO=\"zram_cleanup_rules_end\"" > "$UDEV_FILE"
