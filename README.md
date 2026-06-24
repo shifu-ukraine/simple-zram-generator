@@ -58,8 +58,8 @@ If you just want to deploy this setup immediately with the default configuration
 
 ```bash
 # 1. Download the configurator and the sample layout
-sudo wget https://raw.githubusercontent.com/shifu-ukraine/simple-zram-generator/main/simple-zram-generator -O /usr/local/bin/simple-zram-generator
-sudo wget https://raw.githubusercontent.com/shifu-ukraine/simple-zram-generator/main/zram-slices.conf -O /etc/zram-slices.conf
+sudo wget https://raw.githubusercontent.com/shifu-ukraine/simple-zram-generator/refs/heads/main/simple-zram-generator -O /usr/local/bin/simple-zram-generator
+sudo wget https://raw.githubusercontent.com/shifu-ukraine/simple-zram-generator/refs/heads/main/zram-slices.conf -O /etc/zram-slices.conf
 
 # 2. Make it executable and run
 sudo chmod +x /usr/local/bin/simple-zram-generator
