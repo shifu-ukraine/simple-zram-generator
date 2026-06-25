@@ -50,14 +50,15 @@ while IFS= read -r line || [ -n "$line" ]; do
   target=$(echo "$target" | xargs)
 
   DEV_NAME="zram${DEV_INDEX}"
-  echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
 
-  # 1. Append to UDEV rules
-  echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
-
-  # 2. Generate Systemd units based on type
+  # 2. Generate Systemd units and UDEV rules based on valid type
   case "$type" in
     swap)
+      echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
+      
+      # Append to UDEV rules only on success
+      echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
+
       # Format service
       cat << EOF > "$SYSTEMD_DIR/$DEV_NAME-mkswap.service"
 [Unit]
@@ -93,9 +94,15 @@ Priority=100
 RequiredBy=swap.target
 EOF
       UNITS_TO_ENABLE+=("dev-$DEV_NAME.swap")
+      ((DEV_INDEX++))
       ;;
 
     tmp)
+      echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
+      
+      # Append to UDEV rules only on success
+      echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
+
       # Format service
       cat << EOF > "$SYSTEMD_DIR/$DEV_NAME-mkfs.service"
 [Unit]
@@ -128,9 +135,15 @@ Type=ext4
 Options=rw,nosuid,nodev,noexec,relatime
 EOF
       UNITS_TO_ENABLE+=("tmp.mount")
+      ((DEV_INDEX++))
       ;;
 
     mount)
+      echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
+      
+      # Append to UDEV rules only on success
+      echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
+
       # Escape path for systemd unit naming (e.g., /var/tmp/portage -> var-tmp-portage.mount)
       SYSTEMD_MOUNT_NAME=$(systemd-escape -p --suffix=mount "$target")
 
@@ -171,6 +184,7 @@ Options=rw,relatime
 WantedBy=local-fs.target
 EOF
       UNITS_TO_ENABLE+=("$SYSTEMD_MOUNT_NAME")
+      ((DEV_INDEX++))
       ;;
 
     *)
@@ -178,7 +192,6 @@ EOF
       ;;
   esac
 
-  ((DEV_INDEX++))
 done < "$CONFIG_FILE"
 
 # Close UDEV rules file
