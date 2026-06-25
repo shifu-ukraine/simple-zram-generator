@@ -192,7 +192,7 @@ EOF
       ;;
   esac
 
-done < "$CONFIG_FILE"
+done < <(sed 's/[[:space:]]*#.*//' "$CONFIG_FILE" | grep -E '^[^|]+\|[^|]+\|[^|]+\|[^|]+$')
 
 # Close UDEV rules file
 echo "LABEL=\"zram_cleanup_rules_end\"" >> "$UDEV_FILE"
