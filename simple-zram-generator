@@ -4,11 +4,20 @@
 # Parses /etc/zram-slices.conf and generates custom udev rules + systemd units.
 #
 
+# --- Global Configurations & Paths ---
 CONFIG_FILE="/etc/zram-slices.conf"
 UDEV_FILE="/etc/udev/rules.d/10-zram.rules"
 SYSTEMD_DIR="/etc/systemd/system"
 MODPROBE_FILE="/etc/modprobe.d/zram.conf"
 MODULES_LOAD_FILE="/etc/modules-load.d/zram.conf"
+
+# --- State Variables & Regex Patterns ---
+DEV_INDEX=0
+UNITS_TO_ENABLE=()
+VALID_STRUCTURE='^[^|]+\|[^|]+\|[^|]+\|[^|]+$'
+ALLOWED_ALGOS=""    # Will be populated dynamically
+AVAILABLE_ALGOS=""  # Will be populated dynamically
+ZRAM_MODULE_LOADED_BY_US=false
 
 # Ensure root privileges
 if [ "$EUID" -ne 0 ]; then
@@ -25,25 +34,30 @@ fi
 echo "---------- Simple zram generator ----------"
 echo "=== Starting Dynamic ZRAM Configuration ==="
 
+# Temporarily load zram module to probe kernel capabilities if not already loaded
+if [ ! -d "/sys/block/zram0" ]; then
+  if modprobe zram num_devices=1 2>/dev/null; then
+    ZRAM_MODULE_LOADED_BY_US=true
+  fi
+fi
+
+# Read available compression algorithms directly from the kernel
+if [ -f "/sys/block/zram0/comp_algorithm" ]; then
+  AVAILABLE_ALGOS=$(cat /sys/block/zram0/comp_algorithm | tr -d '[]')
+  ALLOWED_ALGOS="^($(echo "$AVAILABLE_ALGOS" | tr ' ' '|'))$"
+else
+  echo "Error: Cannot detect kernel ZRAM algorithms. Is zram module compiled?" >&2
+  [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+  exit 1
+fi
+
+# Initialize UDEV rules file
 echo "KERNEL==\"zram*\", ATTR{disksize}!=\"0\", GOTO=\"zram_cleanup_rules_end\"" > "$UDEV_FILE"
 
-# Track enabled units for systemctl enable stage
-UNITS_TO_ENABLE=()
+# Main processing pipeline (Process Substitution preserves variables in the current shell)
+while IFS='|' read -r size algo type target || [ -n "$size" ]; do
 
-# Counter for zram device index (zram0, zram1...)
-DEV_INDEX=0
-
-# Read config line by line, ignoring comments and empty lines
-while IFS= read -r line || [ -n "$line" ]; do
-  # Strip leading/trailing whitespace and quotes
-  line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
-
-  [[ -z "$line" || "$line" =~ ^# ]] && continue
-
-  # Parse fields split by pipe (|)
-  IFS='|' read -r size algo type target <<< "$line"
-
-  # Trim spaces from variables
+  # Trim leading/trailing whitespaces from variables
   size=$(echo "$size" | xargs)
   algo=$(echo "$algo" | xargs)
   type=$(echo "$type" | xargs)
@@ -51,15 +65,74 @@ while IFS= read -r line || [ -n "$line" ]; do
 
   DEV_NAME="zram${DEV_INDEX}"
 
-  # 2. Generate Systemd units and UDEV rules based on valid type
+  # VALIDATION 1: Device Type Check
+  if [[ "$type" != "swap" && "$type" != "tmp" && "$type" != "mount" ]]; then
+    echo "Error: Unknown ZRAM type '$type' for $DEV_NAME. Aborting." >&2
+    rm -f "$UDEV_FILE"
+    [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+    exit 1
+  fi
+
+  # VALIDATION 2: Disk Size Syntax Check (digits + optional suffixes K, M, G...)
+  if [[ ! "$size" =~ ^[0-9]+[kKmMgGtT]?[iI]?[bB]?$ ]]; then
+    echo "Error: Invalid size syntax '$size' for $DEV_NAME. Aborting." >&2
+    rm -f "$UDEV_FILE"
+    [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+    exit 1
+  fi
+
+  # VALIDATION 3: Dynamic Kernel Compression Algorithm Check
+  if [[ ! "$algo" =~ $ALLOWED_ALGOS ]]; then
+    echo "==========================================================" >&2
+    echo "ERROR: Unsupported compression algorithm '$algo' for $DEV_NAME!" >&2
+    echo "Your current kernel only supports: $AVAILABLE_ALGOS" >&2
+    echo "==========================================================" >&2
+    rm -f "$UDEV_FILE"
+    [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+    exit 1
+  fi
+
+  # VALIDATION 4: Target Field Dependency Check
+  if [[ "$type" == "swap" && -z "$target" ]]; then
+    echo "Error: Swap label (target) cannot be empty for $DEV_NAME. Aborting." >&2
+    rm -f "$UDEV_FILE"
+    [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+    exit 1
+  elif [[ "$type" == "tmp" && "$target" != "/tmp" ]]; then
+    echo "Error: Target for 'tmp' type must be strictly '/tmp' (current: '$target'). Aborting." >&2
+    rm -f "$UDEV_FILE"
+    [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+    exit 1
+  elif [[ "$type" == "mount" ]]; then
+    if [[ ! "$target" =~ ^/ ]]; then
+      echo "Error: Target path '$target' for $DEV_NAME must be an absolute path starting with '/'. Aborting." >&2
+      rm -f "$UDEV_FILE"
+      [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+      exit 1
+    fi
+
+    # Automatically create the target directory if it does not exist
+    if [ ! -d "$target" ]; then
+      echo "Notice: Target directory '$target' does not exist. Creating it..."
+      if ! mkdir -p "$target"; then
+        echo "Error: Failed to create target directory '$target'. Aborting." >&2
+        rm -f "$UDEV_FILE"
+        [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
+        exit 1
+      fi
+      chmod 755 "$target"
+    fi
+  fi
+
+  # === VALIDATION PASSED — GENERATING CONFIGURATIONS ===
+  echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
+  
+  # Append to UDEV rules
+  echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
+
+  # Generate Systemd units based on verified type
   case "$type" in
     swap)
-      echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
-      
-      # Append to UDEV rules only on success
-      echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
-
-      # Format service
       cat << EOF > "$SYSTEMD_DIR/$DEV_NAME-mkswap.service"
 [Unit]
 Description=Format $DEV_NAME for dev-$DEV_NAME.swap
@@ -77,7 +150,6 @@ RemainAfterExit=yes
 RequiredBy=dev-$DEV_NAME.swap
 EOF
 
-      # Swap unit
       cat << EOF > "$SYSTEMD_DIR/dev-$DEV_NAME.swap"
 [Unit]
 Description=Enable $DEV_NAME swap device
@@ -94,16 +166,9 @@ Priority=100
 RequiredBy=swap.target
 EOF
       UNITS_TO_ENABLE+=("dev-$DEV_NAME.swap")
-      ((DEV_INDEX++))
       ;;
 
     tmp)
-      echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
-      
-      # Append to UDEV rules only on success
-      echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
-
-      # Format service
       cat << EOF > "$SYSTEMD_DIR/$DEV_NAME-mkfs.service"
 [Unit]
 Description=Format $DEV_NAME for /tmp
@@ -121,7 +186,6 @@ RemainAfterExit=yes
 WantedBy=tmp.mount
 EOF
 
-      # Drop-in override for systemd's built-in tmp.mount
       mkdir -p "$SYSTEMD_DIR/tmp.mount.d"
       cat << EOF > "$SYSTEMD_DIR/tmp.mount.d/override.conf"
 [Unit]
@@ -135,19 +199,11 @@ Type=ext4
 Options=rw,nosuid,nodev,noexec,relatime
 EOF
       UNITS_TO_ENABLE+=("tmp.mount")
-      ((DEV_INDEX++))
       ;;
 
     mount)
-      echo "Processing $DEV_NAME: Size=$size, Algo=$algo, Type=$type, Target=$target"
-      
-      # Append to UDEV rules only on success
-      echo "KERNEL==\"$DEV_NAME\", SUBSYSTEM==\"block\", ACTION==\"add\", ATTR{comp_algorithm}=\"$algo\", ATTR{disksize}=\"$size\"" >> "$UDEV_FILE"
-
-      # Escape path for systemd unit naming (e.g., /var/tmp/portage -> var-tmp-portage.mount)
       SYSTEMD_MOUNT_NAME=$(systemd-escape -p --suffix=mount "$target")
 
-      # Format service
       cat << EOF > "$SYSTEMD_DIR/$DEV_NAME-mkfs.service"
 [Unit]
 Description=Prepare $DEV_NAME for $target
@@ -165,7 +221,6 @@ RemainAfterExit=yes
 WantedBy=$SYSTEMD_MOUNT_NAME
 EOF
 
-      # Mount unit
       cat << EOF > "$SYSTEMD_DIR/$SYSTEMD_MOUNT_NAME"
 [Unit]
 Description=Mount ZRAM on $target
@@ -184,30 +239,33 @@ Options=rw,relatime
 WantedBy=local-fs.target
 EOF
       UNITS_TO_ENABLE+=("$SYSTEMD_MOUNT_NAME")
-      ((DEV_INDEX++))
-      ;;
-
-    *)
-      echo "Warning: Unknown ZRAM type '$type' in config. Skipping." >&2
       ;;
   esac
 
-done < <(sed 's/[[:space:]]*#.*//' "$CONFIG_FILE" | grep -E '^[^|]+\|[^|]+\|[^|]+\|[^|]+$')
+  ((DEV_INDEX++))
+
+done < <(sed 's/[[:space:]]*#.*//' "$CONFIG_FILE" | grep -E "$VALID_STRUCTURE")
 
 # Close UDEV rules file
 echo "LABEL=\"zram_cleanup_rules_end\"" >> "$UDEV_FILE"
 
-# 3. Finalize configurations using the final DEV_INDEX value
+# Final sanity check and persistence generation
 if [ "$DEV_INDEX" -eq 0 ]; then
   echo "Error: No active devices were configured from $CONFIG_FILE" >&2
+  rm -f "$UDEV_FILE"
+  [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]] && rmmod zram 2>/dev/null
   exit 1
+fi
+
+# Clean up the kernel module if we loaded it temporarily for verification
+if [[ "$ZRAM_MODULE_LOADED_BY_US" == true ]]; then
+  rmmod zram 2>/dev/null
 fi
 
 echo "Generating modprobe options with num_devices=$DEV_INDEX..."
 echo "options zram num_devices=$DEV_INDEX" > "$MODPROBE_FILE"
 echo "zram" > "$MODULES_LOAD_FILE"
 
-# 4. Reload systemd and apply changes
 echo "Reloading systemd manager..."
 systemctl daemon-reload
 
@@ -219,3 +277,10 @@ done
 echo "=== Success! Configs generated and systemd targets updated. ==="
 echo "To apply udev changes immediately, run:"
 echo "sudo udevadm control --reload-rules && sudo udevadm trigger"
+echo ""
+echo "================================ IMPORTANT ================================"
+echo "WARNING: If your system uses an initramfs (e.g., dracut, genkernel),"
+echo "you MUST rebuild it to include the new udev rules and modprobe configs!"
+echo "Otherwise, the zram module might be initialized incorrectly during early boot."
+echo "Example (Dracut): sudo dracut --force"
+echo "==========================================================================="
